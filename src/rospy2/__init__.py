@@ -43,14 +43,22 @@ _on_shutdown = None
 
 def get_param(param_name, default_value = None):
     global _node
-    if param_name.startswith("/"):
-        logerror("Getting parameters of other nodes is not yet supported")
-        return 0
-
+    # Strip ~ prefix (node-local, same thing in ROS 2)
     param_name = param_name.strip("~")
+    # Strip absolute namespace: "/vehicle/wheel_base" → "wheel_base"
+    if param_name.startswith("/"):
+        param_name = param_name.rsplit("/", 1)[-1]
     if not _node.has_parameter(param_name):
-        _node.declare_parameter(param_name, default_value)
-    return _node.get_parameter(param_name)._value
+        descriptor = rclpy.node.ParameterDescriptor(dynamic_typing=True)
+        _node.declare_parameter(param_name, default_value, descriptor)
+    value = _node.get_parameter(param_name).value
+    if value is None and default_value is not None:
+        return default_value
+    return value
+
+def get_name():
+    global _node
+    return _node.get_name()
 
 def init_node(node_name, anonymous=False, log_level=INFO, disable_signals=False):
     global _node, _logger, _clock, _thread_spin
@@ -74,6 +82,8 @@ def init_node(node_name, anonymous=False, log_level=INFO, disable_signals=False)
     }.get(log_level, rclpy.logging.LoggingSeverity.UNSET)
     rclpy.logging.set_logger_level(_logger.name, ros2_log_level)
 
+    _patch_tf2_ros()
+
     _thread_spin = threading.Thread(target=_thread_spin_target, daemon=True)
     _thread_spin.start()
 
@@ -85,25 +95,40 @@ def _thread_spin_target():
 
 is_shutdown = lambda: not rclpy.ok()
 
-logdebug = lambda text: _logger.debug(text)
-logdebug_once = lambda text: _logger.debug(text, once = True)
-logdebug_throttle = lambda interval, text: _logger.debug(text, throttle_duration_sec = interval)
+def logdebug(text, *args):
+    _logger.debug(text % args if args else text)
+def logdebug_once(text, *args):
+    _logger.debug(text % args if args else text, once = True)
+def logdebug_throttle(interval, text, *args):
+    _logger.debug(text % args if args else text, throttle_duration_sec = interval)
 
-loginfo = lambda text: _logger.info(text)
-loginfo_once = lambda text: _logger.info(text, once = True)
-loginfo_throttle = lambda interval, text: _logger.info(text, throttle_duration_sec = interval)
+def loginfo(text, *args):
+    _logger.info(text % args if args else text)
+def loginfo_once(text, *args):
+    _logger.info(text % args if args else text, once = True)
+def loginfo_throttle(interval, text, *args):
+    _logger.info(text % args if args else text, throttle_duration_sec = interval)
 
-logwarn = lambda text: _logger.warn(text)
-logwarn_once = lambda text: _logger.warn(text, once = True)
-logwarn_throttle = lambda interval, text: _logger.warn(text, throttle_duration_sec = interval)
+def logwarn(text, *args):
+    _logger.warn(text % args if args else text)
+def logwarn_once(text, *args):
+    _logger.warn(text % args if args else text, once = True)
+def logwarn_throttle(interval, text, *args):
+    _logger.warn(text % args if args else text, throttle_duration_sec = interval)
 
-logerr = lambda text: _logger.error(text)
-logerr_once = lambda text: _logger.error(text, once = True)
-logerr_throttle = lambda interval, text: _logger.error(text, throttle_duration_sec = interval)
+def logerr(text, *args):
+    _logger.error(text % args if args else text)
+def logerr_once(text, *args):
+    _logger.error(text % args if args else text, once = True)
+def logerr_throttle(interval, text, *args):
+    _logger.error(text % args if args else text, throttle_duration_sec = interval)
 
-logfatal = lambda text: _logger.fatal(text)
-logfatal_once = lambda text: _logger.fatal(text, once = True)
-logfatal_throttle = lambda interval, text: _logger.fatal(text, throttle_duration_sec = interval)
+def logfatal(text, *args):
+    _logger.fatal(text % args if args else text)
+def logfatal_once(text, *args):
+    _logger.fatal(text % args if args else text, once = True)
+def logfatal_throttle(interval, text, *args):
+    _logger.fatal(text % args if args else text, throttle_duration_sec = interval)
 
 def on_shutdown(handler):
     global _on_shutdown
@@ -181,18 +206,17 @@ def wait_for_service(service_name):
         time.sleep(0.5)
 
 class Publisher(object):
-    def __init__(self, topic_name, topic_type, queue_size = 1):
+    def __init__(self, topic_name, topic_type, queue_size = 1, latch = False, tcp_nodelay = False):
         global _node
         self.reg_type = "pub"
         self.data_class = topic_type
         self.name = topic_name
         self.resolved_name = topic_name
         self.type = _ros2_type_to_type_name(topic_type)
-        self._pub = _node.create_publisher(
-            topic_type,
-            topic_name,
-            rclpy.qos.QoSProfile(depth = queue_size, history = rclpy.qos.HistoryPolicy.KEEP_LAST)
-        )
+        qos = rclpy.qos.QoSProfile(depth = queue_size, history = rclpy.qos.HistoryPolicy.KEEP_LAST)
+        if latch:
+            qos.durability = rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL
+        self._pub = _node.create_publisher(topic_type, topic_name, qos)
         self.get_num_connections = self._pub.get_subscription_count
 
     def __del__(self):
@@ -213,7 +237,8 @@ class Publisher(object):
         _node.destroy_publisher(self._pub)
 
 class Subscriber(object):
-    def __init__(self, topic_name, topic_type, callback, callback_args = None):
+    def __init__(self, topic_name, topic_type, callback, callback_args = None,
+                 queue_size = 10, tcp_nodelay = False, buff_size = None):
         global _node
         self.reg_type = "sub"
         self.data_class = topic_type
@@ -222,8 +247,8 @@ class Subscriber(object):
         self.type = _ros2_type_to_type_name(topic_type)
         self.callback = callback
         self.callback_args = callback_args
-        self._sub = _node.create_subscription(topic_type, topic_name, self._ros2_callback, 10, event_callbacks = rclpy.qos_event.SubscriptionEventCallbacks())
-        _node.guards
+        qos_depth = queue_size if queue_size is not None else 100
+        self._sub = _node.create_subscription(topic_type, topic_name, self._ros2_callback, qos_depth)
         self.get_num_connections = lambda: 1 # No good ROS2 equivalent
 
     def __del__(self):
@@ -409,6 +434,12 @@ exceptions.ROSInitException = ROSInitException
 builtin_interfaces.msg.Time.to_nsec = lambda self: self.sec * 1000000000 + self.nanosec
 builtin_interfaces.msg.Time.to_sec = lambda self: self.sec + self.nanosec / 1e9
 builtin_interfaces.msg.Time.is_zero = lambda self: self.sec == 0 and self.nanosec == 0
+builtin_interfaces.msg.Time.__gt__ = lambda self, other: self.to_nsec() > other.to_nsec()
+builtin_interfaces.msg.Time.__lt__ = lambda self, other: self.to_nsec() < other.to_nsec()
+builtin_interfaces.msg.Time.__ge__ = lambda self, other: self.to_nsec() >= other.to_nsec()
+builtin_interfaces.msg.Time.__le__ = lambda self, other: self.to_nsec() <= other.to_nsec()
+builtin_interfaces.msg.Time.__eq__ = lambda self, other: isinstance(other, builtin_interfaces.msg.Time) and self.to_nsec() == other.to_nsec()
+builtin_interfaces.msg.Time.__ne__ = lambda self, other: not isinstance(other, builtin_interfaces.msg.Time) or self.to_nsec() != other.to_nsec()
 def secs_setter(self, value): self.sec = value
 builtin_interfaces.msg.Time.secs = property(lambda self: self.sec, secs_setter)
 def nsecs_setter(self, value): self.nanosec = value
@@ -447,14 +478,34 @@ try:
 except:
     pass
 
-try:
-    import tf2_ros
-    tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__oldinit__ = \
-        tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__init__
-    tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__init__ = \
-        lambda self: tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__oldinit__(self, _node)
-except:
-    pass
+_tf2_ros_patched = False
+
+def _patch_tf2_ros():
+    global _tf2_ros_patched, _node
+    if _tf2_ros_patched:
+        return
+    _tf2_ros_patched = True
+    try:
+        import tf2_ros
+        node = _node
+
+        # StaticTransformBroadcaster
+        tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__oldinit__ = \
+            tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__init__
+        tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__init__ = \
+            lambda self: tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__oldinit__(self, node)
+
+        # TransformBroadcaster
+        tf2_ros.TransformBroadcaster.__oldinit__ = tf2_ros.TransformBroadcaster.__init__
+        tf2_ros.TransformBroadcaster.__init__ = \
+            lambda self: tf2_ros.TransformBroadcaster.__oldinit__(self, node)
+
+        # TransformListener — inject node as second argument
+        tf2_ros.TransformListener.__oldinit__ = tf2_ros.TransformListener.__init__
+        tf2_ros.TransformListener.__init__ = \
+            lambda self, buffer, **kw: tf2_ros.TransformListener.__oldinit__(self, buffer, node, **kw)
+    except ImportError:
+        pass
 
 import std_msgs.msg
 std_msgs.msg.Bool.__oldinit__ = std_msgs.msg.Bool.__init__
