@@ -316,7 +316,7 @@ class Duration(object):
 
     @classmethod
     def from_sec(cls, secs):
-        return rclpy.duration.Duration(nanoseconds = secs * 1000000000)
+        return cls(int(secs), int((secs % 1) * 1e9))
 
     @classmethod
     def from_seconds(cls, secs):
@@ -438,6 +438,7 @@ builtin_interfaces.msg.Time.__gt__ = lambda self, other: self.to_nsec() > other.
 builtin_interfaces.msg.Time.__lt__ = lambda self, other: self.to_nsec() < other.to_nsec()
 builtin_interfaces.msg.Time.__ge__ = lambda self, other: self.to_nsec() >= other.to_nsec()
 builtin_interfaces.msg.Time.__le__ = lambda self, other: self.to_nsec() <= other.to_nsec()
+builtin_interfaces.msg.Time.__sub__ = lambda self, other: Duration.from_sec((self.to_nsec() - other.to_nsec()) / 1e9)
 builtin_interfaces.msg.Time.__eq__ = lambda self, other: isinstance(other, builtin_interfaces.msg.Time) and self.to_nsec() == other.to_nsec()
 builtin_interfaces.msg.Time.__ne__ = lambda self, other: not isinstance(other, builtin_interfaces.msg.Time) or self.to_nsec() != other.to_nsec()
 def secs_setter(self, value): self.sec = value
