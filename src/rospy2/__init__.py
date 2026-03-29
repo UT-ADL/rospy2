@@ -303,36 +303,89 @@ class ServiceProxy(object):
         rclpy.spin_until_future_complete(_node, resp)
         return resp
 
+def _duration_to_nsec(self):
+    return self.sec * 1000000000 + self.nanosec
+
+def _duration_to_sec(self):
+    return self.sec + self.nanosec / 1e9
+
+def _duration_is_zero(self):
+    return self.sec == 0 and self.nanosec == 0
+
+def _duration_float(self):
+    return self.sec + self.nanosec / 1e9
+
+def _duration_add(self, other):
+    if isinstance(other, builtin_interfaces.msg.Duration):
+        total_ns = _duration_to_nsec(self) + other.sec * 1000000000 + other.nanosec
+        return builtin_interfaces.msg.Duration(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
+    return NotImplemented
+
+def _duration_radd(self, other):
+    if isinstance(other, builtin_interfaces.msg.Time):
+        total_ns = other.sec * 1000000000 + other.nanosec + _duration_to_nsec(self)
+        return builtin_interfaces.msg.Time(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
+    return NotImplemented
+
+builtin_interfaces.msg.Duration.to_nsec = _duration_to_nsec
+builtin_interfaces.msg.Duration.to_sec = _duration_to_sec
+builtin_interfaces.msg.Duration.is_zero = _duration_is_zero
+builtin_interfaces.msg.Duration.__float__ = _duration_float
+builtin_interfaces.msg.Duration.__add__ = _duration_add
+builtin_interfaces.msg.Duration.__radd__ = _duration_radd
+builtin_interfaces.msg.Duration.secs = property(lambda self: self.sec)
+builtin_interfaces.msg.Duration.nsecs = property(lambda self: self.nanosec)
+
 class Duration(object):
-    def __new__(cls, secs, nsecs = 0):
-        global _node
-        d = rclpy.duration.Duration(nanoseconds = secs * 1000000000 + nsecs)
-        d.to_nsec = types.MethodType(lambda self: self.nanoseconds, d)
-        d.to_sec = types.MethodType(lambda self: self.nanoseconds / 1e9, d)
-        d.is_zero = types.MethodType(lambda self: self.nanoseconds == 0, d)
-        d.secs = secs
-        d.nsecs = nsecs
-        return d
+    def __new__(cls, secs=0, nsecs=0):
+        total_ns = int(secs * 1000000000 + nsecs)
+        return builtin_interfaces.msg.Duration(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
 
     @classmethod
     def from_sec(cls, secs):
-        return cls(int(secs), int((secs % 1) * 1e9))
+        return cls(secs=0, nsecs=int(secs * 1e9))
 
     @classmethod
     def from_seconds(cls, secs):
-        return rclpy.duration.Duration(nanoseconds = secs * 1000000000)
+        return cls(secs=0, nsecs=int(secs * 1e9))
+
+def _time_add(self, other):
+    if isinstance(other, builtin_interfaces.msg.Duration):
+        total_ns = self.sec * 1000000000 + self.nanosec + other.sec * 1000000000 + other.nanosec
+        return builtin_interfaces.msg.Time(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
+    return NotImplemented
+
+def _time_sub(self, other):
+    if isinstance(other, builtin_interfaces.msg.Time):
+        total_ns = (self.sec * 1000000000 + self.nanosec) - (other.sec * 1000000000 + other.nanosec)
+        return Duration(0, total_ns)
+    if isinstance(other, builtin_interfaces.msg.Duration):
+        total_ns = (self.sec * 1000000000 + self.nanosec) - (other.sec * 1000000000 + other.nanosec)
+        return builtin_interfaces.msg.Time(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
+    return NotImplemented
+
+def _time_to_sec(self):
+    return self.sec + self.nanosec / 1e9
+
+def _time_to_nsec(self):
+    return self.sec * 1000000000 + self.nanosec
+
+builtin_interfaces.msg.Time.__add__ = _time_add
+builtin_interfaces.msg.Time.__sub__ = _time_sub
+builtin_interfaces.msg.Time.to_sec = _time_to_sec
+builtin_interfaces.msg.Time.to_nsec = _time_to_nsec
 
 class Time(object):
-    def __new__(cls, secs = 0, nsecs = 0):
-        return builtin_interfaces.msg.Time(sec = secs, nanosec = nsecs)
+    def __new__(cls, secs=0, nsecs=0):
+        return builtin_interfaces.msg.Time(sec=int(secs), nanosec=int(nsecs))
 
     @classmethod
     def from_sec(cls, secs):
-        return builtin_interfaces.msg.Time(sec = secs)
+        return cls(secs=0, nsecs=int(secs * 1e9))
 
     @classmethod
     def from_seconds(cls, secs):
-        return builtin_interfaces.msg.Time(sec = secs)
+        return cls(secs=0, nsecs=int(secs * 1e9))
 
     @classmethod
     def now(cls):
@@ -340,7 +393,7 @@ class Time(object):
         if _clock is None:
             raise ROSInitException("time is not initialized. Have you called init_node()?")
         secs, nsecs = _clock.now().seconds_nanoseconds()
-        return builtin_interfaces.msg.Time(sec = secs, nanosec = nsecs)
+        return builtin_interfaces.msg.Time(sec=secs, nanosec=nsecs)
 
 class Rate(object):
     def __init__(self, hz):
@@ -431,14 +484,11 @@ exceptions = _Module()
 exceptions.ROSException = ROSException
 exceptions.ROSInitException = ROSInitException
 
-builtin_interfaces.msg.Time.to_nsec = lambda self: self.sec * 1000000000 + self.nanosec
-builtin_interfaces.msg.Time.to_sec = lambda self: self.sec + self.nanosec / 1e9
 builtin_interfaces.msg.Time.is_zero = lambda self: self.sec == 0 and self.nanosec == 0
 builtin_interfaces.msg.Time.__gt__ = lambda self, other: self.to_nsec() > other.to_nsec()
 builtin_interfaces.msg.Time.__lt__ = lambda self, other: self.to_nsec() < other.to_nsec()
 builtin_interfaces.msg.Time.__ge__ = lambda self, other: self.to_nsec() >= other.to_nsec()
 builtin_interfaces.msg.Time.__le__ = lambda self, other: self.to_nsec() <= other.to_nsec()
-builtin_interfaces.msg.Time.__sub__ = lambda self, other: Duration.from_sec((self.to_nsec() - other.to_nsec()) / 1e9)
 builtin_interfaces.msg.Time.__eq__ = lambda self, other: isinstance(other, builtin_interfaces.msg.Time) and self.to_nsec() == other.to_nsec()
 builtin_interfaces.msg.Time.__ne__ = lambda self, other: not isinstance(other, builtin_interfaces.msg.Time) or self.to_nsec() != other.to_nsec()
 def secs_setter(self, value): self.sec = value
@@ -505,6 +555,19 @@ def _patch_tf2_ros():
         tf2_ros.TransformListener.__oldinit__ = tf2_ros.TransformListener.__init__
         tf2_ros.TransformListener.__init__ = \
             lambda self, buffer, **kw: tf2_ros.TransformListener.__oldinit__(self, buffer, node, **kw)
+
+        # Buffer.lookup_transform — convert msg types to rclpy types
+        tf2_ros.Buffer.__old_lookup_transform__ = tf2_ros.Buffer.lookup_transform
+        def _patched_lookup_transform(self, target_frame, source_frame, time, timeout=None):
+            if isinstance(time, builtin_interfaces.msg.Time):
+                time = rclpy.time.Time(seconds=time.sec, nanoseconds=time.nanosec)
+            if timeout is not None and isinstance(timeout, builtin_interfaces.msg.Duration):
+                timeout = rclpy.duration.Duration(seconds=timeout.sec, nanoseconds=timeout.nanosec)
+            if timeout is not None:
+                return tf2_ros.Buffer.__old_lookup_transform__(self, target_frame, source_frame, time, timeout)
+            return tf2_ros.Buffer.__old_lookup_transform__(self, target_frame, source_frame, time)
+        tf2_ros.Buffer.lookup_transform = _patched_lookup_transform
+
     except ImportError:
         pass
 
