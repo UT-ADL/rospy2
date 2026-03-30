@@ -563,9 +563,10 @@ def _patch_tf2_ros():
         # The default timeout uses time.sleep() which deadlocks the single-threaded
         # executor when called from callbacks. Use wait_for_transform_async +
         # Event.wait() only when called from the main thread (e.g., during init).
-        # From the spin thread (callbacks), skip the timeout and fall back to
-        # latest available transform on extrapolation errors.
-        import tf2_py as _tf2_py
+        # The default timeout in can_transform() uses time.sleep() which deadlocks
+        # the single-threaded executor. Use wait_for_transform_async + Event.wait()
+        # only from the main thread (init). From the spin thread (callbacks),
+        # skip the timeout — callers handle TransformException for missing data.
         def _patched_lookup_transform(self, target_frame, source_frame, time, timeout=None):
             if isinstance(time, builtin_interfaces.msg.Time):
                 time = rclpy.time.Time(seconds=time.sec, nanoseconds=time.nanosec)
@@ -580,12 +581,7 @@ def _patch_tf2_ros():
                     if future.done():
                         event.set()
                     event.wait(timeout=timeout.nanoseconds / 1e9)
-            try:
-                return self.lookup_transform_core(target_frame, source_frame, time)
-            except _tf2_py.ExtrapolationException:
-                # On spin thread, extrapolation means TF is slightly behind —
-                # fall back to latest available (acceptable for ~2ms gaps)
-                return self.lookup_transform_core(target_frame, source_frame, rclpy.time.Time())
+            return self.lookup_transform_core(target_frame, source_frame, time)
         tf2_ros.Buffer.lookup_transform = _patched_lookup_transform
 
     except ImportError:
