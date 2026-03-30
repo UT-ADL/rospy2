@@ -377,15 +377,18 @@ builtin_interfaces.msg.Time.to_nsec = _time_to_nsec
 
 class Time(object):
     def __new__(cls, secs=0, nsecs=0):
-        return builtin_interfaces.msg.Time(sec=int(secs), nanosec=int(nsecs))
+        total_ns = int(secs) * 1000000000 + int(nsecs)
+        return builtin_interfaces.msg.Time(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
 
     @classmethod
     def from_sec(cls, secs):
-        return cls(secs=0, nsecs=int(secs * 1e9))
+        total_ns = int(secs * 1e9)
+        return builtin_interfaces.msg.Time(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
 
     @classmethod
     def from_seconds(cls, secs):
-        return cls(secs=0, nsecs=int(secs * 1e9))
+        total_ns = int(secs * 1e9)
+        return builtin_interfaces.msg.Time(sec=int(total_ns // 1000000000), nanosec=int(total_ns % 1000000000))
 
     @classmethod
     def now(cls):
@@ -556,16 +559,33 @@ def _patch_tf2_ros():
         tf2_ros.TransformListener.__init__ = \
             lambda self, buffer, **kw: tf2_ros.TransformListener.__oldinit__(self, buffer, node, **kw)
 
-        # Buffer.lookup_transform — convert msg types to rclpy types
-        tf2_ros.Buffer.__old_lookup_transform__ = tf2_ros.Buffer.lookup_transform
+        # Buffer.lookup_transform — convert msg types to rclpy types.
+        # The default timeout uses time.sleep() which deadlocks the single-threaded
+        # executor when called from callbacks. Use wait_for_transform_async +
+        # Event.wait() only when called from the main thread (e.g., during init).
+        # From the spin thread (callbacks), skip the timeout and fall back to
+        # latest available transform on extrapolation errors.
+        import tf2_py as _tf2_py
         def _patched_lookup_transform(self, target_frame, source_frame, time, timeout=None):
             if isinstance(time, builtin_interfaces.msg.Time):
                 time = rclpy.time.Time(seconds=time.sec, nanoseconds=time.nanosec)
             if timeout is not None and isinstance(timeout, builtin_interfaces.msg.Duration):
                 timeout = rclpy.duration.Duration(seconds=timeout.sec, nanoseconds=timeout.nanosec)
-            if timeout is not None:
-                return tf2_ros.Buffer.__old_lookup_transform__(self, target_frame, source_frame, time, timeout)
-            return tf2_ros.Buffer.__old_lookup_transform__(self, target_frame, source_frame, time)
+            if timeout is not None and timeout.nanoseconds > 0:
+                # Only wait if NOT on the spin thread (avoids deadlock in callbacks)
+                if threading.current_thread() is not _thread_spin:
+                    future = self.wait_for_transform_async(target_frame, source_frame, time)
+                    event = threading.Event()
+                    future.add_done_callback(lambda _: event.set())
+                    if future.done():
+                        event.set()
+                    event.wait(timeout=timeout.nanoseconds / 1e9)
+            try:
+                return self.lookup_transform_core(target_frame, source_frame, time)
+            except _tf2_py.ExtrapolationException:
+                # On spin thread, extrapolation means TF is slightly behind —
+                # fall back to latest available (acceptable for ~2ms gaps)
+                return self.lookup_transform_core(target_frame, source_frame, rclpy.time.Time())
         tf2_ros.Buffer.lookup_transform = _patched_lookup_transform
 
     except ImportError:
