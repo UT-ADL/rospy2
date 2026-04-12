@@ -48,6 +48,8 @@ def get_param(param_name, default_value = None):
     # Strip absolute namespace: "/vehicle/wheel_base" → "wheel_base"
     if param_name.startswith("/"):
         param_name = param_name.rsplit("/", 1)[-1]
+    # ROS 1 uses / for param sub-namespaces, ROS 2 uses dots
+    param_name = param_name.replace("/", ".")
     if not _node.has_parameter(param_name):
         descriptor = rclpy.node.ParameterDescriptor(dynamic_typing=True)
         _node.declare_parameter(param_name, default_value, descriptor)
@@ -543,6 +545,28 @@ def _patch_tf2_ros():
         import tf2_ros
         node = _node
 
+        # Create a dedicated TF node on its own executor thread.
+        # The main _node runs a SingleThreadedExecutor — if a subscriber callback
+        # calls lookup_transform with timeout, the sleep blocks the only thread
+        # that could deliver TF data, causing a deadlock. By putting the
+        # TransformListener on a separate node/thread, TF data arrives
+        # independently and the timeout wait works correctly from any thread.
+        # Propagate use_sim_time at creation time so TimeSource subscribes to /clock
+        use_sim_time = node.get_parameter('use_sim_time').value
+        param_overrides = []
+        if use_sim_time:
+            param_overrides.append(rclpy.parameter.Parameter(
+                'use_sim_time', rclpy.parameter.Parameter.Type.BOOL, True))
+        tf_node = rclpy.create_node(
+            '_tf_listener_' + node.get_name(),
+            parameter_overrides=param_overrides,
+            allow_undeclared_parameters=True,
+            automatically_declare_parameters_from_overrides=True,
+        )
+        tf_executor = rclpy.executors.SingleThreadedExecutor()
+        tf_executor.add_node(tf_node)
+        threading.Thread(target=tf_executor.spin, daemon=True).start()
+
         # StaticTransformBroadcaster
         tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__oldinit__ = \
             tf2_ros.static_transform_broadcaster.StaticTransformBroadcaster.__init__
@@ -554,33 +578,27 @@ def _patch_tf2_ros():
         tf2_ros.TransformBroadcaster.__init__ = \
             lambda self: tf2_ros.TransformBroadcaster.__oldinit__(self, node)
 
-        # TransformListener — inject node as second argument
+        # TransformListener — use dedicated TF node so subscriptions run on
+        # the TF thread, not the main executor thread.
         tf2_ros.TransformListener.__oldinit__ = tf2_ros.TransformListener.__init__
         tf2_ros.TransformListener.__init__ = \
-            lambda self, buffer, **kw: tf2_ros.TransformListener.__oldinit__(self, buffer, node, **kw)
+            lambda self, buffer, **kw: tf2_ros.TransformListener.__oldinit__(self, buffer, tf_node, **kw)
 
-        # Buffer.lookup_transform — convert msg types to rclpy types.
-        # The default timeout uses time.sleep() which deadlocks the single-threaded
-        # executor when called from callbacks. Use wait_for_transform_async +
-        # Event.wait() only when called from the main thread (e.g., during init).
-        # The default timeout in can_transform() uses time.sleep() which deadlocks
-        # the single-threaded executor. Use wait_for_transform_async + Event.wait()
-        # only from the main thread (init). From the spin thread (callbacks),
-        # skip the timeout — callers handle TransformException for missing data.
+        # Buffer.lookup_transform — convert msg types to rclpy types and wait
+        # for transforms using wait_for_transform_async + Event. Safe from any
+        # thread because TF data arrives on the dedicated TF thread.
         def _patched_lookup_transform(self, target_frame, source_frame, time, timeout=None):
             if isinstance(time, builtin_interfaces.msg.Time):
                 time = rclpy.time.Time(seconds=time.sec, nanoseconds=time.nanosec)
             if timeout is not None and isinstance(timeout, builtin_interfaces.msg.Duration):
                 timeout = rclpy.duration.Duration(seconds=timeout.sec, nanoseconds=timeout.nanosec)
             if timeout is not None and timeout.nanoseconds > 0:
-                # Only wait if NOT on the spin thread (avoids deadlock in callbacks)
-                if threading.current_thread() is not _thread_spin:
-                    future = self.wait_for_transform_async(target_frame, source_frame, time)
-                    event = threading.Event()
-                    future.add_done_callback(lambda _: event.set())
-                    if future.done():
-                        event.set()
-                    event.wait(timeout=timeout.nanoseconds / 1e9)
+                future = self.wait_for_transform_async(target_frame, source_frame, time)
+                event = threading.Event()
+                future.add_done_callback(lambda _: event.set())
+                if future.done():
+                    event.set()
+                event.wait(timeout=timeout.nanoseconds / 1e9)
             return self.lookup_transform_core(target_frame, source_frame, time)
         tf2_ros.Buffer.lookup_transform = _patched_lookup_transform
 
