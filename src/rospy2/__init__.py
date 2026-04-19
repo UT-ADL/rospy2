@@ -13,6 +13,8 @@ import rclpy
 import rclpy.logging
 import rclpy.qos
 import rclpy.qos_event
+import rclpy.callback_groups
+import rclpy.executors
 import sys
 import time
 import types
@@ -38,6 +40,7 @@ _node = None
 _logger = None
 _clock = None
 _thread_spin = None
+_executor = None
 _wait_for_message_release = False
 _on_shutdown = None
 
@@ -90,8 +93,10 @@ def init_node(node_name, anonymous=False, log_level=INFO, disable_signals=False)
     _thread_spin.start()
 
 def _thread_spin_target():
-    global _on_shutdown, _node
-    rclpy.spin(_node)
+    global _on_shutdown, _node, _executor
+    _executor = rclpy.executors.MultiThreadedExecutor()
+    _executor.add_node(_node)
+    _executor.spin()
     if _on_shutdown:
         _on_shutdown()
 
@@ -250,7 +255,9 @@ class Subscriber(object):
         self.callback = callback
         self.callback_args = callback_args
         qos_depth = queue_size if queue_size is not None else 100
-        self._sub = _node.create_subscription(topic_type, topic_name, self._ros2_callback, qos_depth)
+        self._callback_group = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
+        self._sub = _node.create_subscription(topic_type, topic_name, self._ros2_callback, qos_depth,
+            callback_group=self._callback_group)
         self.get_num_connections = lambda: 1 # No good ROS2 equivalent
 
     def __del__(self):
@@ -284,7 +291,9 @@ class Subscriber(object):
 class Service(object):
     def __init__(self, service_name, service_type, callback):
         global _node
-        self._srv = _node.create_service(service_type, service_name, callback)
+        self._callback_group = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
+        self._srv = _node.create_service(service_type, service_name, callback,
+            callback_group=self._callback_group)
 
     def __del__(self):
         global _node
@@ -420,7 +429,9 @@ class Timer(object):
             period_sec = timer_period.nanoseconds / 1e9
         else:
             period_sec = timer_period
-        self._timer = _node.create_timer(period_sec, self._ros2_callback)
+        self._callback_group = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
+        self._timer = _node.create_timer(period_sec, self._ros2_callback,
+            callback_group=self._callback_group)
 
     def __del__(self):
         global _node
