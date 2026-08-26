@@ -308,11 +308,22 @@ class ServiceProxy(object):
         global _node
         _node.destroy_client(self._client)
 
-    def __call__(self, req):
-        global _node
-        resp = self._client.call_async(req)
-        rclpy.spin_until_future_complete(_node, resp)
-        return resp
+    def __call__(self, req, timeout=5.0):
+        # Do not spin the node from here: rclpy.spin_until_future_complete()
+        # moves the node into the global executor and, when done, removes it
+        # from every executor, so the node stops processing callbacks after
+        # its first service call. The node's own executor delivers the
+        # response on another thread; just wait for the future.
+        if not self._client.wait_for_service(timeout_sec=timeout):
+            raise ServiceException("service %s is not available" % self._client.srv_name)
+        future = self._client.call_async(req)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(timeout):
+            raise ServiceException("service %s call timed out" % self._client.srv_name)
+        if future.exception() is not None:
+            raise ServiceException(str(future.exception()))
+        return future.result()
 
 def _duration_to_nsec(self):
     return self.sec * 1000000000 + self.nanosec
