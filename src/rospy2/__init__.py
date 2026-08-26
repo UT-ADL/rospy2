@@ -568,8 +568,13 @@ def _patch_tf2_ros():
         if use_sim_time:
             param_overrides.append(rclpy.parameter.Parameter(
                 'use_sim_time', rclpy.parameter.Parameter.Type.BOOL, True))
+        # Ignore global ROS arguments: the launch file's __node:= remap would
+        # otherwise rename this node to the main node's name, registering a
+        # duplicate rosout publisher and parameter services under that name.
         tf_node = rclpy.create_node(
             '_tf_listener_' + node.get_name(),
+            namespace=node.get_namespace(),
+            use_global_arguments=False,
             parameter_overrides=param_overrides,
             allow_undeclared_parameters=True,
             automatically_declare_parameters_from_overrides=True,
